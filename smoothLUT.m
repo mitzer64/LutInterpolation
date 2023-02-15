@@ -100,7 +100,7 @@ classdef smoothLUT
         c          % knot values, (n+2)x(m+2) numerical matrix
     end
     
-    properties (SetAccess = private, GetAccess = private)
+    properties (SetAccess = private, GetAccess = public)
         hx % step size xk-data
         hy % step size yk-data
         x0 % first entry of xk-data
@@ -111,7 +111,7 @@ classdef smoothLUT
     
     methods
         function obj = set.xk(obj,new_xk)
-            if isnumeric(new_xk) && isreal(new_xk) && length(new_xk(1,:))==1 && length(new_xk(:,1))>1 && max(new_xk(2:end)-new_xk(1:end-1))==min(new_xk(2:end)-new_xk(1:end-1))
+            if isnumeric(new_xk) && isreal(new_xk) && length(new_xk(1,:))==1 && length(new_xk(:,1))>1 && (abs(max(new_xk(2:end)-new_xk(1:end-1))-min(new_xk(2:end)-new_xk(1:end-1)))<eps*1e2)
                 obj.xk = new_xk;
                 obj.n  = length(new_xk);
                 obj.hx = new_xk(2)-new_xk(1);
@@ -122,7 +122,7 @@ classdef smoothLUT
         end
         
         function obj = set.yk(obj,new_yk)
-            if isnumeric(new_yk) && isreal(new_yk) && length(new_yk(1,:))>1 && length(new_yk(:,1))==1 && max(new_yk(2:end)-new_yk(1:end-1))==min(new_yk(2:end)-new_yk(1:end-1))
+            if isnumeric(new_yk) && isreal(new_yk) && length(new_yk(1,:))>1 && length(new_yk(:,1))==1 && (abs(max(new_yk(2:end)-new_yk(1:end-1))-min(new_yk(2:end)-new_yk(1:end-1)))<eps*1e2)
                 obj.yk = new_yk;
                 obj.m  = length(new_yk);
                 obj.hy = new_yk(2)-new_yk(1);
@@ -244,12 +244,21 @@ classdef smoothLUT
                 UB = obj.ub*ones((obj.n+2)*(obj.m+2),1);
             end
             
+            
+            % compute coefficients with quadratic program (see Eq. 18 in [1])
             % set cost function matrices
             P      = A'*(indivWeights)'*indivWeights*A+obj.r*(Axx+2*Axy+Ayy);
-            Q      = 2*zk_row'*(indivWeights)'*indivWeights*A;
+            Q      = 2*zk_row'*(indivWeights)'*indivWeights*A;      
+            %Compute using OSQP
+            prob = osqp;
+            %A is identity matrix to get box constraints
+            prob.setup(2*P,(-Q)',eye(length(UB)),LB,UB,'alpha',1);
+            res=prob.solve();
+            c_row=res.x;
+           
+            %Comment in to use quadprog
+            %c_row  = quadprog(2*P,(-Q)',[],[],[],[],LB,UB);
             
-            % compute knots with quadratic program (see Eq. 18 in [1])
-            c_row  = quadprog(2*P,(-Q)',[],[],[],[],LB,UB);
             c_line = c_row';
             obj.c  = (reshape(c_line,[obj.m+2,obj.n+2]))';
         end
@@ -477,7 +486,7 @@ classdef smoothLUT
     methods (Access = private)
         function [A] = getMatrixA(obj) 
             % s(x_St,y_St)=A*c with A=B^T.*B (see Sec. IIIA in [1])
-            A     = zeros(obj.n*obj.m,(obj.n+2)*(obj.m+2));
+            A      = spalloc(obj.n*obj.m,(obj.n+2)*(obj.m+2),obj.n*obj.m*9);
             Zeile = 1;
             for j = 0:obj.n-1
                 for i = 1:obj.m
@@ -497,18 +506,23 @@ classdef smoothLUT
             Aiquadr  = [1/5 7/30 -2/5 -1/30; 7/30 17/15 -29/30 -2/5; -2/5 -29/30 17/15 7/30; -1/30 -2/5 7/30 1/5]/4;
             Aiiquadr = [1/3 -1/2 0 1/6; -1/2 1 -1/2 0; 0 -1/2 1 -1/2; 1/6 0 -1/2 1/3];
             
-            Axx = zeros((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2));
+            Axx = spalloc((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2),obj.n*obj.m*16*4);
+            %Axx = zeros((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2));
             for i=1:obj.n-1 % sum over x
                 for j=1:obj.m-1 % sum over y
                     for u=1:4 % outer Kronecker
                         for v=1:4 % inner Kronecker
-                            Axx((i-1+u-1)*(obj.m+2)+j:(i-1+u-1)*(obj.m+2)+j+3,(i-1+v-1)*(obj.m+2)+j:(i-1+v-1)*(obj.m+2)+j+3) = Axx((i-1+u-1)*(obj.m+2)+j:(i-1+u-1)*(obj.m+2)+j+3,(i-1+v-1)*(obj.m+2)+j:(i-1+v-1)*(obj.m+2)+j+3)+Aiiquadr(u,v)*Aquadr;
+                            xs=(i-1+u-1)*(obj.m+2)+j;
+                            ys=(i-1+v-1)*(obj.m+2)+j;
+                            Axx(xs:xs+3,ys:ys+3) = Axx(xs:xs+3,ys:ys+3)+Aiiquadr(u,v)*Aquadr;
                         end
                     end
                 end
             end
             
-            Ayy = zeros((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2));
+            
+            
+            Ayy = spalloc((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2),obj.n*obj.m*16*4);
             for i=1:obj.n-1
                 for j=1:obj.m-1
                     for u=1:4
@@ -519,7 +533,8 @@ classdef smoothLUT
                 end
             end
             
-            Axy = zeros((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2));
+            
+            Axy = spalloc((obj.n+2)*(obj.m+2),(obj.n+2)*(obj.m+2),obj.n*obj.m*16*4);
             for i=1:obj.n-1
                 for j=1:obj.m-1
                     for u=1:4
